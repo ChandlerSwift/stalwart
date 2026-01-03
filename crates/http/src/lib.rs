@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod autoconfig;
+pub mod calendar_share;
 pub mod form;
 pub mod management;
 pub mod request;

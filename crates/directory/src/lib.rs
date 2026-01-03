@@ -70,6 +70,7 @@ pub enum PrincipalData {
     // Secrets
     AppPassword(String),
     OtpAuth(String),
+    CalendarShareLink(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

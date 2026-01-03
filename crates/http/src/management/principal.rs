@@ -43,6 +43,35 @@ pub struct AccountAuthResponse {
     pub app_passwords: Vec<String>,
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "camelCase")]
+pub enum CalendarShareRequest {
+    Create {
+        calendar_id: String,
+        description: String,
+    },
+    Delete {
+        share_id: String,
+    },
+    UpdateLastUsed {
+        share_id: String,
+    },
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct CalendarShareLink {
+    pub id: String,
+    pub calendar_id: String,
+    pub description: String,
+    pub secret: Option<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: u64,
+    #[serde(rename = "lastUsed")]
+    pub last_used: Option<u64>,
+    pub url: Option<String>,
+}
+
 pub trait PrincipalManager: Sync + Send {
     fn handle_manage_principal(
         &self,
@@ -62,6 +91,18 @@ pub trait PrincipalManager: Sync + Send {
         req: &HttpRequest,
         access_token: Arc<AccessToken>,
         body: Option<Vec<u8>>,
+    ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
+
+    fn handle_calendar_shares_get(
+        &self,
+        access_token: Arc<AccessToken>,
+    ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
+
+    fn handle_calendar_shares_post(
+        &self,
+        access_token: Arc<AccessToken>,
+        body: Option<Vec<u8>>,
+        base_url: &str,
     ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 
     fn assert_supported_directory(&self, override_: bool) -> trc::Result<()>;
@@ -857,6 +898,173 @@ impl PrincipalManager for Server {
 
         Ok(JsonResponse::new(json!({
             "data": (),
+        }))
+        .into_http_response())
+    }
+
+    async fn handle_calendar_shares_get(
+        &self,
+        access_token: Arc<AccessToken>,
+    ) -> trc::Result<HttpResponse> {
+        let mut share_links = Vec::new();
+
+        if access_token.primary_id() != u32::MAX {
+            let principal = self
+                .directory()
+                .query(QueryParams::id(access_token.primary_id()).with_return_member_of(false))
+                .await?
+                .ok_or_else(|| trc::ManageEvent::NotFound.into_err())?;
+
+            for data in &principal.data {
+                if let PrincipalData::CalendarShareLink(secret) = data {
+                    if let Some((meta, hashed_secret)) =
+                        secret.strip_prefix("$cal$").and_then(|s| s.split_once('$'))
+                    {
+                        // Parse metadata: calendar_id|description|created_at|last_used
+                        let parts: Vec<&str> = meta.split('|').collect();
+                        if parts.len() >= 3 {
+                            share_links.push(CalendarShareLink {
+                                id: format!("{:x}", xxhash_rust::xxh3::xxh3_64(secret.as_bytes())),
+                                calendar_id: parts[0].to_string(),
+                                description: parts[1].to_string(),
+                                secret: None, // Never return the actual secret
+                                created_at: parts[2].parse().unwrap_or(0),
+                                last_used: parts.get(3).and_then(|s| s.parse().ok()),
+                                url: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(JsonResponse::new(json!({
+            "data": share_links,
+        }))
+        .into_http_response())
+    }
+
+    async fn handle_calendar_shares_post(
+        &self,
+        access_token: Arc<AccessToken>,
+        body: Option<Vec<u8>>,
+        base_url: &str,
+    ) -> trc::Result<HttpResponse> {
+        // Parse request
+        let request =
+            serde_json::from_slice::<CalendarShareRequest>(body.as_deref().unwrap_or_default())
+                .map_err(|err| {
+                    trc::EventType::Resource(trc::ResourceEvent::BadParameters).from_json_error(err)
+                })?;
+
+        // Make sure the current directory supports updates
+        self.assert_supported_directory(false)?;
+
+        let mut response_data = None;
+
+        match request {
+            CalendarShareRequest::Create {
+                calendar_id,
+                description,
+            } => {
+                // Generate a cryptographically secure random secret
+                let secret_bytes = utils::config::utils::generate_random_bytes::<32>();
+                let secret = data_encoding::BASE32_NOPAD.encode(&secret_bytes);
+                let created_at = store::write::now();
+
+                // Build the share link metadata
+                // Format: $cal$calendar_id|description|created_at|last_used$hashed_secret
+                let metadata = format!("{}|{}|{}", calendar_id, description, created_at);
+                let hashed_secret = utils::config::utils::hash_secret(&secret);
+                let share_link_data = format!("$cal${}${}", metadata, hashed_secret);
+
+                // Add the share link
+                let actions = vec![PrincipalUpdate {
+                    action: PrincipalAction::AddItem,
+                    field: PrincipalField::Secrets,
+                    value: PrincipalValue::String(share_link_data.clone()),
+                }];
+
+                let changed_principals = self
+                    .core
+                    .storage
+                    .data
+                    .update_principal(
+                        UpdatePrincipal::by_id(access_token.primary_id())
+                            .with_updates(actions)
+                            .with_tenant(access_token.tenant.map(|t| t.id)),
+                    )
+                    .await?;
+
+                self.invalidate_principal_caches(changed_principals).await;
+
+                // Return the share link with the plain secret (only time it's visible)
+                let share_id = format!("{:x}", xxhash_rust::xxh3::xxh3_64(share_link_data.as_bytes()));
+                let url = format!("{}/calendar/share/{}", base_url, secret);
+
+                response_data = Some(CalendarShareLink {
+                    id: share_id,
+                    calendar_id,
+                    description,
+                    secret: Some(secret),
+                    created_at,
+                    last_used: None,
+                    url: Some(url),
+                });
+            }
+            CalendarShareRequest::Delete { share_id } => {
+                // Find and remove the share link by ID
+                let principal = self
+                    .directory()
+                    .query(QueryParams::id(access_token.primary_id()).with_return_member_of(false))
+                    .await?
+                    .ok_or_else(|| trc::ManageEvent::NotFound.into_err())?;
+
+                let mut found = false;
+                for data in &principal.data {
+                    if let PrincipalData::CalendarShareLink(secret) = data {
+                        let id = format!("{:x}", xxhash_rust::xxh3::xxh3_64(secret.as_bytes()));
+                        if id == share_id {
+                            let actions = vec![PrincipalUpdate {
+                                action: PrincipalAction::RemoveItem,
+                                field: PrincipalField::Secrets,
+                                value: PrincipalValue::String(secret.clone()),
+                            }];
+
+                            let changed_principals = self
+                                .core
+                                .storage
+                                .data
+                                .update_principal(
+                                    UpdatePrincipal::by_id(access_token.primary_id())
+                                        .with_updates(actions)
+                                        .with_tenant(access_token.tenant.map(|t| t.id)),
+                                )
+                                .await?;
+
+                            self.invalidate_principal_caches(changed_principals).await;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+
+                if !found {
+                    return Err(trc::ResourceEvent::NotFound.into_err());
+                }
+            }
+            CalendarShareRequest::UpdateLastUsed { share_id } => {
+                // This will be called by the public iCal endpoint
+                // For now, we'll skip implementing last_used tracking to keep changes minimal
+                // It would require updating the metadata string in the secret
+                return Err(trc::ResourceEvent::NotFound
+                    .into_err()
+                    .details("UpdateLastUsed not yet implemented"));
+            }
+        }
+
+        Ok(JsonResponse::new(json!({
+            "data": response_data,
         }))
         .into_http_response())
     }
