@@ -540,6 +540,7 @@ impl PrincipalData {
             PrincipalData::Password(v)
             | PrincipalData::AppPassword(v)
             | PrincipalData::OtpAuth(v)
+            | PrincipalData::CalendarShareLink(v)
             | PrincipalData::Description(v)
             | PrincipalData::PrimaryEmail(v)
             | PrincipalData::EmailAlias(v)

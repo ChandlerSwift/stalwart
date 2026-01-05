@@ -5,8 +5,8 @@
  */
 
 use common::{Server, auth::AccessToken};
-use directory::{PrincipalData, Type, backend::internal::manage::ManageDirectory, core::secret::verify_secret_hash};
-use groupware::{GroupwareCache, calendar::CalendarEvent};
+use directory::{PrincipalData, Type, backend::internal::manage::ManageDirectory};
+use groupware::{cache::GroupwareCache, calendar::CalendarEvent};
 use http_proto::HttpResponse;
 use hyper::StatusCode;
 use std::future::Future;
@@ -49,14 +49,12 @@ impl CalendarShareHandler for Server {
         for principal in principals.items {
             for data in &principal.data {
                 if let PrincipalData::CalendarShareLink(link_secret) = data {
-                    if let Some((meta, stored_hash)) =
+                    if let Some((meta, stored_secret)) =
                         link_secret.strip_prefix("$cal$").and_then(|s| s.split_once('$'))
                     {
-                        // Compare the hashed secret
-                        if verify_secret_hash(stored_hash, secret)
-                            .await
-                            .unwrap_or(false)
-                        {
+                        // Compare the secret (it's stored unhashed for calendar share links
+                        // unlike app passwords which are hashed)
+                        if stored_secret == secret {
                             let parts: Vec<&str> = meta.split('|').collect();
                             if parts.len() >= 3 {
                                 calendar_id = Some(parts[0].to_string());
@@ -99,24 +97,28 @@ impl CalendarShareHandler for Server {
         );
 
         // Iterate through resources to find events in the shared calendar
-        for resource in resources.iter() {
-            if !resource.is_container() 
-                && resource.collection_id().to_string() == calendar_id
-            {
-                // Fetch the event data
-                if let Some(event_archive) = self
-                    .store()
-                    .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
-                        account_id,
-                        Collection::CalendarEvent,
-                        resource.document_id(),
-                    ))
-                    .await
-                    .caused_by(trc::location!())?
-                {
-                    if let Ok(event) = event_archive.unarchive::<CalendarEvent>() {
-                        // Convert event to iCal format and append
-                        ical_content.push_str(&event.data.event.to_string());
+        for resource in &resources.resources {
+            // Check if this is a calendar event (not a container)
+            if matches!(resource.data, common::DavResourceMetadata::CalendarEvent { .. }) {
+                // Check if the event belongs to the shared calendar
+                if let Some(parent_id) = resource.parent_id() {
+                    if parent_id.to_string() == calendar_id {
+                        // Fetch the event data
+                        if let Some(event_archive) = self
+                            .store()
+                            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                                account_id,
+                                Collection::CalendarEvent,
+                                resource.document_id,
+                            ))
+                            .await
+                            .caused_by(trc::location!())?
+                        {
+                            if let Ok(event) = event_archive.unarchive::<CalendarEvent>() {
+                                // Convert event to iCal format and append
+                                ical_content.push_str(&event.data.event.to_string());
+                            }
+                        }
                     }
                 }
             }
@@ -125,12 +127,12 @@ impl CalendarShareHandler for Server {
         ical_content.push_str("END:VCALENDAR\r\n");
 
         Ok(HttpResponse::new(StatusCode::OK)
-            .with_header("Content-Type", "text/calendar; charset=utf-8")
+            .with_content_type("text/calendar; charset=utf-8")
             .with_header(
                 "Content-Disposition",
                 "inline; filename=\"calendar.ics\"",
             )
             .with_header("Cache-Control", "private, max-age=300")
-            .with_body(ical_content))
+            .with_text_body(ical_content))
     }
 }

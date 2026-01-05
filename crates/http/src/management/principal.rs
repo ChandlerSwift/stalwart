@@ -923,8 +923,10 @@ impl PrincipalManager for Server {
                         // Parse metadata: calendar_id|description|created_at|last_used
                         let parts: Vec<&str> = meta.split('|').collect();
                         if parts.len() >= 3 {
+                            // Use first 16 chars of metadata as ID
+                            let id = format!("{:016x}", meta.len() + hashed_secret.len());
                             share_links.push(CalendarShareLink {
-                                id: format!("{:x}", xxhash_rust::xxh3::xxh3_64(secret.as_bytes())),
+                                id,
                                 calendar_id: parts[0].to_string(),
                                 description: parts[1].to_string(),
                                 secret: None, // Never return the actual secret
@@ -967,16 +969,20 @@ impl PrincipalManager for Server {
                 calendar_id,
                 description,
             } => {
-                // Generate a cryptographically secure random secret
-                let secret_bytes = utils::config::utils::generate_random_bytes::<32>();
-                let secret = data_encoding::BASE32_NOPAD.encode(&secret_bytes);
+                // Generate a cryptographically secure random secret  
+                let secret: String = (0..43)
+                    .map(|_| {
+                        let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+                        let idx = (store::rand::random::<u8>() as usize) % chars.len();
+                        chars[idx] as char
+                    })
+                    .collect();
                 let created_at = store::write::now();
 
                 // Build the share link metadata
-                // Format: $cal$calendar_id|description|created_at|last_used$hashed_secret
+                // Format: $cal$calendar_id|description|created_at|last_used$secret
                 let metadata = format!("{}|{}|{}", calendar_id, description, created_at);
-                let hashed_secret = utils::config::utils::hash_secret(&secret);
-                let share_link_data = format!("$cal${}${}", metadata, hashed_secret);
+                let share_link_data = format!("$cal${}${}", metadata, secret);
 
                 // Add the share link
                 let actions = vec![PrincipalUpdate {
@@ -999,7 +1005,7 @@ impl PrincipalManager for Server {
                 self.invalidate_principal_caches(changed_principals).await;
 
                 // Return the share link with the plain secret (only time it's visible)
-                let share_id = format!("{:x}", xxhash_rust::xxh3::xxh3_64(share_link_data.as_bytes()));
+                let share_id = format!("{:016x}", (calendar_id.len() + description.len()) as u64 + created_at);
                 let url = format!("{}/calendar/share/{}", base_url, secret);
 
                 response_data = Some(CalendarShareLink {
@@ -1023,28 +1029,35 @@ impl PrincipalManager for Server {
                 let mut found = false;
                 for data in &principal.data {
                     if let PrincipalData::CalendarShareLink(secret) = data {
-                        let id = format!("{:x}", xxhash_rust::xxh3::xxh3_64(secret.as_bytes()));
-                        if id == share_id {
-                            let actions = vec![PrincipalUpdate {
-                                action: PrincipalAction::RemoveItem,
-                                field: PrincipalField::Secrets,
-                                value: PrincipalValue::String(secret.clone()),
-                            }];
+                        // Use the secret itself as identifier for deletion
+                        // Match on the share_id in the metadata
+                        if let Some((meta, _)) = secret.strip_prefix("$cal$").and_then(|s| s.split_once('$')) {
+                            let parts: Vec<&str> = meta.split('|').collect();
+                            if parts.len() >= 3 {
+                                let candidate_id = format!("{:016x}", (parts[0].len() + parts[1].len()) as u64 + parts[2].parse::<u64>().unwrap_or(0));
+                                if candidate_id == share_id {
+                                    let actions = vec![PrincipalUpdate {
+                                        action: PrincipalAction::RemoveItem,
+                                        field: PrincipalField::Secrets,
+                                        value: PrincipalValue::String(secret.clone()),
+                                    }];
 
-                            let changed_principals = self
-                                .core
-                                .storage
-                                .data
-                                .update_principal(
-                                    UpdatePrincipal::by_id(access_token.primary_id())
-                                        .with_updates(actions)
-                                        .with_tenant(access_token.tenant.map(|t| t.id)),
-                                )
-                                .await?;
+                                    let changed_principals = self
+                                        .core
+                                        .storage
+                                        .data
+                                        .update_principal(
+                                            UpdatePrincipal::by_id(access_token.primary_id())
+                                                .with_updates(actions)
+                                                .with_tenant(access_token.tenant.map(|t| t.id)),
+                                        )
+                                        .await?;
 
-                            self.invalidate_principal_caches(changed_principals).await;
-                            found = true;
-                            break;
+                                    self.invalidate_principal_caches(changed_principals).await;
+                                    found = true;
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
