@@ -14,6 +14,7 @@ use crate::{
         },
     },
     autoconfig::Autoconfig,
+    calendar_share::CalendarShareHandler,
     form::FormHandler,
     management::{
         ManagementApi, ToManageHttpResponse, UnauthorizedResponse, troubleshoot::TroubleshootApi,
@@ -502,6 +503,12 @@ impl ParseHttp for Server {
                                 .into_http_response()
                                 .with_no_store()
                         });
+                } else if req.method() == Method::GET
+                    && path.next().unwrap_or_default() == "share"
+                {
+                    if let Some(secret) = path.next() {
+                        return self.handle_calendar_share_ical(secret).await;
+                    }
                 }
             }
             "autodiscover" | "Autodiscover" => {

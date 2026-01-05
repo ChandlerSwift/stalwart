@@ -398,6 +398,10 @@ impl ManageDirectory for Store {
                 create_principal
                     .data
                     .push(PrincipalData::AppPassword(secret));
+            } else if secret.is_calendar_share_link() {
+                create_principal
+                    .data
+                    .push(PrincipalData::CalendarShareLink(secret));
             } else if !has_secret {
                 has_secret = true;
                 create_principal.data.push(PrincipalData::Password(secret));
@@ -1175,6 +1179,7 @@ impl ManageDirectory for Store {
                             PrincipalData::Password(_)
                                 | PrincipalData::AppPassword(_)
                                 | PrincipalData::OtpAuth(_)
+                                | PrincipalData::CalendarShareLink(_)
                         )
                     });
                     let mut has_secret = false;
@@ -1183,6 +1188,10 @@ impl ManageDirectory for Store {
                             principal.data.push(PrincipalData::OtpAuth(secret));
                         } else if secret.is_app_secret() {
                             principal.data.push(PrincipalData::AppPassword(secret));
+                        } else if secret.is_calendar_share_link() {
+                            principal
+                                .data
+                                .push(PrincipalData::CalendarShareLink(secret));
                         } else if !has_secret {
                             has_secret = true;
                             principal.data.push(PrincipalData::Password(secret));
@@ -1197,7 +1206,8 @@ impl ManageDirectory for Store {
                     if !principal.data.iter().any(|v| match v {
                         PrincipalData::Password(v)
                         | PrincipalData::AppPassword(v)
-                        | PrincipalData::OtpAuth(v) => *v == secret,
+                        | PrincipalData::OtpAuth(v)
+                        | PrincipalData::CalendarShareLink(v) => *v == secret,
                         _ => false,
                     }) {
                         if secret.is_app_secret() {
@@ -1207,6 +1217,10 @@ impl ManageDirectory for Store {
                                 .data
                                 .retain(|v| !matches!(v, PrincipalData::OtpAuth(_)));
                             principal.data.push(PrincipalData::OtpAuth(secret));
+                        } else if secret.is_calendar_share_link() {
+                            principal
+                                .data
+                                .push(PrincipalData::CalendarShareLink(secret));
                         } else {
                             principal
                                 .data
@@ -1226,9 +1240,9 @@ impl ManageDirectory for Store {
                     // Password changed, update changed principals
                     changed_principals.add_change(principal_id, principal_type, change.field);
 
-                    if secret.is_app_secret() || secret.is_otp_secret() {
+                    if secret.is_app_secret() || secret.is_otp_secret() || secret.is_calendar_share_link() {
                         principal.data.retain(|v| match v {
-                            PrincipalData::AppPassword(v) | PrincipalData::OtpAuth(v) => {
+                            PrincipalData::AppPassword(v) | PrincipalData::OtpAuth(v) | PrincipalData::CalendarShareLink(v) => {
                                 *v != secret && !v.starts_with(secret.as_str())
                             }
                             _ => true,
@@ -2389,7 +2403,8 @@ impl ManageDirectory for Store {
                 }
                 PrincipalData::Password(secret)
                 | PrincipalData::AppPassword(secret)
-                | PrincipalData::OtpAuth(secret) => {
+                | PrincipalData::OtpAuth(secret)
+                | PrincipalData::CalendarShareLink(secret) => {
                     if fields.is_empty() || fields.contains(&PrincipalField::Secrets) {
                         result.append_str(PrincipalField::Secrets, secret);
                     }

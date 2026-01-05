@@ -274,6 +274,7 @@ impl PrincipalField {
 pub trait SpecialSecrets {
     fn is_otp_secret(&self) -> bool;
     fn is_app_secret(&self) -> bool;
+    fn is_calendar_share_link(&self) -> bool;
 }
 
 impl<T> SpecialSecrets for T
@@ -286,5 +287,9 @@ where
 
     fn is_app_secret(&self) -> bool {
         self.as_ref().starts_with("$app$")
+    }
+
+    fn is_calendar_share_link(&self) -> bool {
+        self.as_ref().starts_with("$cal$")
     }
 }

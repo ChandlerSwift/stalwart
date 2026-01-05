@@ -111,6 +111,10 @@ impl SqlDirectory {
                                             }
                                         } else if secret.is_app_secret() {
                                             principal.data.push(PrincipalData::AppPassword(secret));
+                                        } else if secret.is_calendar_share_link() {
+                                            principal
+                                                .data
+                                                .push(PrincipalData::CalendarShareLink(secret));
                                         } else if !principal
                                             .data
                                             .iter()

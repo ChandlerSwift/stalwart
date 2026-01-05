@@ -162,6 +162,32 @@ impl ManagementApi for Server {
 
                     self.handle_account_auth_post(req, access_token, body).await
                 }
+                ("calendar-shares", &Method::GET) => {
+                    // Validate the access token
+                    access_token.assert_has_permission(Permission::ManagePasswords)?;
+
+                    self.handle_calendar_shares_get(access_token).await
+                }
+                ("calendar-shares", &Method::POST) => {
+                    // Validate the access token
+                    access_token.assert_has_permission(Permission::ManagePasswords)?;
+
+                    // Get base URL from request
+                    let base_url = req
+                        .uri()
+                        .scheme_str()
+                        .unwrap_or("https")
+                        .to_string()
+                        + "://"
+                        + req
+                            .uri()
+                            .authority()
+                            .map(|a| a.as_str())
+                            .unwrap_or("localhost");
+
+                    self.handle_calendar_shares_post(access_token, body, &base_url)
+                        .await
+                }
                 _ => Err(trc::ResourceEvent::NotFound.into_err()),
             },
             "troubleshoot" => {

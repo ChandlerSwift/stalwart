@@ -456,6 +456,10 @@ impl LdapMappings {
                         otp_secret = Some(item);
                     } else if item.is_app_secret() {
                         principal.data.push(PrincipalData::AppPassword(item));
+                    } else if item.is_calendar_share_link() {
+                        principal
+                            .data
+                            .push(PrincipalData::CalendarShareLink(item));
                     } else if secret.is_none() {
                         secret = Some(item);
                     }
